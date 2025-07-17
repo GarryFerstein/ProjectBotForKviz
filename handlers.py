@@ -38,7 +38,11 @@ async def new_quiz(message):
 # Хэндлер на команду /start
 async def cmd_start(message: types.Message):
     builder = ReplyKeyboardBuilder()
-    builder.add(types.KeyboardButton(text="Начать игру"))
+    builder.add(
+        types.KeyboardButton(text="Начать игру"),
+        types.KeyboardButton(text="Показать ваш последний результат")
+    )
+    builder.adjust(2)
     await message.answer("Добро пожаловать в квиз!", reply_markup=builder.as_markup(resize_keyboard=True))
 
 # Хэндлер на команду /quiz и нажатие на кнопку
@@ -54,6 +58,10 @@ async def cmd_stats(message: types.Message):
         await message.answer(f"Ваш последний результат: {result} из {len(quiz_data)} правильных ответов.")
     else:
         await message.answer("Вы еще не проходили квиз.")
+
+# Хэндлер на кнопку 'Показать ваш последний результат'
+async def show_stats(message: types.Message):
+    await cmd_stats(message)
 
 # Callback для правильного ответа
 async def right_answer(callback: types.CallbackQuery):
