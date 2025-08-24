@@ -3,23 +3,22 @@ from aiogram import types, F
 from aiogram.filters.command import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from quiz_data import quiz_data
-from db import update_quiz_index, get_quiz_index, save_result, get_result
-
-# Для хранения количества правильных ответов в сессии пользователя
-user_correct_answers = {}
+from db import update_quiz_index, get_quiz_state
+from config import QUIZ_COVER_IMAGE_URL
 
 def generate_options_keyboard(answer_options, right_answer):
     builder = InlineKeyboardBuilder()
     for option in answer_options:
         builder.add(types.InlineKeyboardButton(
             text=option,
-            callback_data=f"right_answer:{option}" if option == right_answer else f"wrong_answer:{option}")
-        )
+            callback_data=f"answer:{option}:{'right' if option == right_answer else 'wrong'}"
+        ))
     builder.adjust(1)
     return builder.as_markup()
 
 async def get_question(message, user_id):
-    current_question_index = await get_quiz_index(user_id)
+    state = await get_quiz_state(user_id)
+    current_question_index = state["question_index"]
     if current_question_index >= len(quiz_data):
         await message.answer("Вопросов больше нет. Квиз завершен!")
         return
@@ -30,9 +29,15 @@ async def get_question(message, user_id):
 
 async def new_quiz(message):
     user_id = message.from_user.id
-    user_correct_answers[user_id] = 0
-    current_question_index = 0
-    await update_quiz_index(user_id, current_question_index)
+    # Сбрасываем состояние: начальный индекс и счётчик
+    await update_quiz_index(user_id, 0, 0)
+    # Отправляем обложку квиза
+    await message.answer_photo(
+        photo=QUIZ_COVER_IMAGE_URL,
+        caption="Добро пожаловать в квиз! Готовы проверить свои знания?",
+        reply_markup=None
+    )
+    # Начинаем квиз
     await get_question(message, user_id)
 
 # Хэндлер на команду /start
@@ -45,65 +50,59 @@ async def cmd_start(message: types.Message):
     builder.adjust(2)
     await message.answer("Добро пожаловать в квиз!", reply_markup=builder.as_markup(resize_keyboard=True))
 
-# Хэндлер на команду /quiz и нажатие на кнопку
+# Хэндлер на команду /quiz и кнопку
 async def cmd_quiz(message: types.Message):
-    await message.answer(f"Давайте начнем квиз!")
     await new_quiz(message)
 
-# Хэндлер на команду /stats
+# Хэндлер на команду /stats и кнопку
 async def cmd_stats(message: types.Message):
     user_id = message.from_user.id
-    result = await get_result(user_id)
-    if result is not None:
-        await message.answer(f"Ваш последний результат: {result} из {len(quiz_data)} правильных ответов.")
+    state = await get_quiz_state(user_id)
+    total_questions = len(quiz_data)
+    if state["question_index"] == 0 and state["correct_answers"] == 0:
+        await message.answer("Вы ещё не проходили квиз.")
     else:
-        await message.answer("Вы еще не проходили квиз.")
+        await message.answer(f"Ваш последний результат: {state['correct_answers']} из {total_questions} правильных ответов.")
 
-# Хэндлер на кнопку 'Показать ваш последний результат'
 async def show_stats(message: types.Message):
     await cmd_stats(message)
 
-# Callback для правильного ответа
-async def right_answer(callback: types.CallbackQuery):
+# Обработка ответа
+async def handle_answer(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    # Удаляем кнопки
-    await callback.bot.edit_message_reply_markup(
-        chat_id=user_id,
-        message_id=callback.message.message_id,
-        reply_markup=None
-    )
-    # Получаем выбранный вариант
-    answer = callback.data.split(":", 1)[1]
-    # Выводим ответ пользователя
-    await callback.message.answer(f"Ваш ответ: {answer}\nВерно!")
-    # Увеличиваем счетчик правильных ответов
-    user_correct_answers[user_id] = user_correct_answers.get(user_id, 0) + 1
-    current_question_index = await get_quiz_index(user_id)
-    current_question_index += 1
-    await update_quiz_index(user_id, current_question_index)
-    if current_question_index < len(quiz_data):
-        await get_question(callback.message, user_id)
-    else:
-        await save_result(user_id, user_correct_answers[user_id])
-        await callback.message.answer(f"Это был последний вопрос. Квиз завершен! Ваш результат: {user_correct_answers[user_id]} из {len(quiz_data)}.")
+    data = callback.data.split(":")
+    selected_answer = data[1]
+    result = data[2]
 
-# Callback для неправильного ответа
-async def wrong_answer(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
+    # Убираем клавиатуру
     await callback.bot.edit_message_reply_markup(
         chat_id=user_id,
         message_id=callback.message.message_id,
         reply_markup=None
     )
-    answer = callback.data.split(":", 1)[1]
-    current_question_index = await get_quiz_index(user_id)
-    correct_option = quiz_data[current_question_index]['correct_option']
-    correct_text = quiz_data[current_question_index]['options'][correct_option]
-    await callback.message.answer(f"Ваш ответ: {answer}\nНеправильно. Правильный ответ: {correct_text}")
-    current_question_index += 1
-    await update_quiz_index(user_id, current_question_index)
-    if current_question_index < len(quiz_data):
+
+    # Получаем текущее состояние
+    state = await get_quiz_state(user_id)
+    current_question_index = state["question_index"]
+    correct_option_index = quiz_data[current_question_index]["correct_option"]
+    correct_text = quiz_data[current_question_index]["options"][correct_option_index]
+
+    if result == "right":
+        await callback.message.answer(f"Ваш ответ: {selected_answer}\n✅ Верно!")
+        new_correct_count = state["correct_answers"] + 1
+    else:
+        await callback.message.answer(f"Ваш ответ: {selected_answer}\n❌ Неправильно.\nПравильный ответ: {correct_text}")
+        new_correct_count = state["correct_answers"]
+
+    # Переходим к следующему вопросу
+    next_question_index = current_question_index + 1
+
+    if next_question_index < len(quiz_data):
+        await update_quiz_index(user_id, next_question_index, new_correct_count)
         await get_question(callback.message, user_id)
     else:
-        await save_result(user_id, user_correct_answers.get(user_id, 0))
-        await callback.message.answer(f"Это был последний вопрос. Квиз завершен! Ваш результат: {user_correct_answers.get(user_id, 0)} из {len(quiz_data)}.") 
+        # Квиз завершён
+        final_score = new_correct_count
+        total_questions = len(quiz_data)
+        await update_quiz_index(user_id, next_question_index, final_score)
+        await callback.message.answer(f"🎉 Квиз завершён!\nВаш результат: {final_score} из {total_questions} правильных ответов.")
